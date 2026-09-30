@@ -9,12 +9,13 @@ W, H = 1080, 1920
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 TEXT_Y = {"dark": 0.15, "brain": 0.80}
 MUSIC_VOL = 0.15
+MAX_WORDS = 3
 
 def pick(folder, exts):
     files = [f for e in exts for f in glob.glob(os.path.join(folder, "*." + e))]
     return random.choice(files)
 
-def text_img(text, size=72, max_w=900):
+def text_img(text, size=104, max_w=940):
     font = ImageFont.truetype(FONT, size)
     d = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
     lines, cur = [], ""
@@ -28,63 +29,81 @@ def text_img(text, size=72, max_w=900):
             cur = w
     if cur:
         lines.append(cur)
-    lh = int(size * 1.35)
+    lh = int(size * 1.3)
     img = Image.new("RGBA", (W, lh * len(lines) + 40), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     for i, l in enumerate(lines):
         tw = d.textlength(l, font=font)
         d.text(((W - tw) / 2, 20 + i * lh), l, font=font,
-               fill="white", stroke_width=5, stroke_fill="black")
+               fill="white", stroke_width=6, stroke_fill="black")
     return np.array(img)
 
 def norm(w):
     return re.sub(r"[^a-z0-9']", "", w.lower())
 
-def starts_from_words(lines, words, total):
-    words = [(norm(t), s, e) for t, s, e in words if norm(t)]
-    toks = [(norm(w), li) for li, l in enumerate(lines)
-            for w in l.split() if norm(w)]
-    a = [t[0] for t in toks]
-    b = [w[0] for w in words]
-    tstart = [None] * len(a)
+def word_starts(words_txt, heard, total):
+    heard = [(norm(t), s, e) for t, s, e in heard if norm(t)]
+    a = [norm(w) for w in words_txt]
+    b = [h[0] for h in heard]
+    st = [None] * len(a)
+    en = [None] * len(a)
     sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    matched = 0
     for blk in sm.get_matching_blocks():
         for k in range(blk.size):
-            tstart[blk.a + k] = words[blk.b + k][1]
-    starts = []
-    for li in range(len(lines)):
-        idx = [i for i, t in enumerate(toks) if t[1] == li]
-        starts.append(next((tstart[i] for i in idx if tstart[i] is not None), None))
-    starts[0] = 0.0
-    chars = [len(l) for l in lines]
-    for i in range(1, len(lines)):
-        if starts[i] is None:
-            p = max(j for j in range(i) if starts[j] is not None)
-            n = next((j for j in range(i + 1, len(lines)) if starts[j] is not None), None)
-            end_t = starts[n] if n is not None else total
-            span = sum(chars[p:(n if n is not None else len(lines))])
-            starts[i] = starts[p] + (end_t - starts[p]) * sum(chars[p:i]) / span
-    starts = [max(0.0, s - 0.08) if i else 0.0 for i, s in enumerate(starts)]
-    for i in range(1, len(starts)):
-        starts[i] = max(starts[i], starts[i - 1] + 0.3)
-    return starts
+            st[blk.a + k] = heard[blk.b + k][1]
+            en[blk.a + k] = heard[blk.b + k][2]
+            matched += 1
+    i, n = 0, len(a)
+    while i < n:
+        if st[i] is not None:
+            i += 1
+            continue
+        j = i
+        while j < n and st[j] is None:
+            j += 1
+        t0 = en[i - 1] if i > 0 else 0.0
+        t1 = st[j] if j < n else total
+        w = [max(len(words_txt[k]), 1) for k in range(i, j)]
+        acc = 0
+        for k in range(i, j):
+            st[k] = t0 + (t1 - t0) * acc / sum(w)
+            acc += w[k - i]
+            en[k] = t0 + (t1 - t0) * acc / sum(w)
+        i = j
+    return st, matched
 
-def get_starts(lines, audio_path, total):
+def make_chunks(lines, maxw=MAX_WORDS):
+    out, idx = [], 0
+    for l in lines:
+        ws = l.split()
+        cur, first = [], idx
+        for k, w in enumerate(ws):
+            if not cur:
+                first = idx
+            cur.append(w)
+            idx += 1
+            if len(cur) >= maxw or re.search(r"[,.!?;:]$", w) or k == len(ws) - 1:
+                out.append((" ".join(cur), first))
+                cur = []
+    return out
+
+def get_word_times(words_txt, lines, audio_path, total):
     try:
         from faster_whisper import WhisperModel
         model = WhisperModel("base.en", device="cpu", compute_type="int8")
-        segs, _ = model.transcribe(audio_path, word_timestamps=True, language="en")
-        words = [(w.word, w.start, w.end) for s in segs for w in s.words]
-        print("Whisper words:", len(words))
-        return starts_from_words(lines, words, total)
+        segs, _ = model.transcribe(
+            audio_path, word_timestamps=True, language="en",
+            initial_prompt=" ".join(lines), condition_on_previous_text=False)
+        heard = [(w.word, w.start, w.end) for s in segs for w in s.words]
+        st, matched = word_starts(words_txt, heard, total)
+        print("Whisper heard", len(heard), "words; matched", matched,
+              "of", len(words_txt))
+        return st
     except Exception as e:
         print("Whisper failed, using fallback:", e)
-        chars = [len(l) for l in lines]
-        tot, acc, out = sum(chars), 0, []
-        for c in chars:
-            out.append(total * acc / tot)
-            acc += c
-        return out
+        st, _ = word_starts(words_txt, [], total)
+        return st
 
 def main():
     folder = sys.argv[1] if len(sys.argv) > 1 else sorted(glob.glob("queue/*/"))[0]
@@ -103,16 +122,22 @@ def main():
     dim = ColorClip((W, H), color=(0, 0, 0)).set_opacity(0.25).set_duration(dur)
 
     lines = data["lines"]
-    starts = get_starts(lines, voice_path, voice.duration)
-    print("Line starts:", [round(x, 2) for x in starts])
+    words_txt = " ".join(lines).split()
+    wst = get_word_times(words_txt, lines, voice_path, voice.duration)
+    chunks = make_chunks(lines)
+    starts = [max(0.0, wst[fi] - 0.05) for _, fi in chunks]
+    starts[0] = 0.0
+    for i in range(1, len(starts)):
+        starts[i] = max(starts[i], starts[i - 1] + 0.15)
+    print("Chunk starts:", [(c[0], round(t, 2)) for c, t in zip(chunks, starts)])
+
     py = TEXT_Y.get(cat, 0.5)
     clips = []
-    for i, l in enumerate(lines):
+    for i, (txt, _) in enumerate(chunks):
         st = starts[i]
-        en = starts[i + 1] if i + 1 < len(lines) else dur
-        arr = text_img(l)
-        c = (ImageClip(arr).set_start(st).set_duration(max(en - st, 0.3))
-             .crossfadein(0.2)
+        en = starts[i + 1] if i + 1 < len(chunks) else dur
+        arr = text_img(txt)
+        c = (ImageClip(arr).set_start(st).set_duration(max(en - st, 0.15))
              .set_position(("center", py * H - arr.shape[0] / 2)))
         clips.append(c)
 
