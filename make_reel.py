@@ -1,43 +1,72 @@
 import json, random, glob, os, sys, re, difflib, base64, subprocess
 import numpy as np
 import requests
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from moviepy.editor import (AudioFileClip, ImageClip, ColorClip,
                             CompositeVideoClip, CompositeAudioClip)
 from moviepy.audio.fx.all import audio_loop
 
 W, H = 1080, 1920
-FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-TEXT_Y = {"dark": 0.15, "brain": 0.80}
+TEXT_Y = {"dark": 0.80, "brain": 0.15}
+ACCENT = {"dark": (120, 220, 255), "brain": (255, 214, 64)}
+UPPER = True
 MUSIC_VOL = 0.15
 MAX_WORDS = 3
+
+def find_font():
+    for p in sorted(glob.glob("fonts/*.ttf") + glob.glob("fonts/*.otf")):
+        return p
+    for name in ["Montserrat-ExtraBold", "Montserrat-Bold", "Poppins-ExtraBold",
+                 "Poppins-Bold", "Oswald-Bold"]:
+        hits = glob.glob("/usr/share/fonts/**/" + name + ".*", recursive=True)
+        if hits:
+            return hits[0]
+    return "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+FONT = find_font()
+print("Font:", FONT)
 
 def pick(folder, exts):
     files = [f for e in exts for f in glob.glob(os.path.join(folder, "*." + e))]
     return random.choice(files)
 
-def text_img(text, size=104, max_w=940):
+def text_img(text, accent, size=100, max_w=920):
     font = ImageFont.truetype(FONT, size)
-    d = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
-    lines, cur = [], ""
-    for w in text.split():
-        t = (cur + " " + w).strip()
-        if d.textlength(t, font=font) <= max_w:
-            cur = t
+    words = (text.upper() if UPPER else text).split()
+    meas = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    space = meas.textlength(" ", font=font)
+    lines, cur, cur_w = [], [], 0
+    for w in words:
+        ww = meas.textlength(w, font=font)
+        add = ww if not cur else space + ww
+        if cur and cur_w + add > max_w:
+            lines.append(cur)
+            cur, cur_w = [w], ww
         else:
-            if cur:
-                lines.append(cur)
-            cur = w
+            cur.append(w)
+            cur_w += add
     if cur:
         lines.append(cur)
-    lh = int(size * 1.3)
-    img = Image.new("RGBA", (W, lh * len(lines) + 40), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    for i, l in enumerate(lines):
-        tw = d.textlength(l, font=font)
-        d.text(((W - tw) / 2, 20 + i * lh), l, font=font,
-               fill="white", stroke_width=6, stroke_fill="black")
-    return np.array(img)
+    key = max(range(len(words)),
+              key=lambda i: len(re.sub(r"[^A-Za-z0-9]", "", words[i])))
+    lh, pad = int(size * 1.25), 40
+    layer = Image.new("RGBA", (W, lh * len(lines) + 2 * pad), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    gi = 0
+    for li, ln in enumerate(lines):
+        lw = sum(meas.textlength(w, font=font) for w in ln) + space * (len(ln) - 1)
+        x, y = (W - lw) / 2, pad + li * lh
+        for w in ln:
+            col = accent if gi == key else (255, 255, 255)
+            d.text((x, y), w, font=font, fill=col,
+                   stroke_width=7, stroke_fill=(0, 0, 0))
+            x += meas.textlength(w, font=font) + space
+            gi += 1
+    shadow = Image.new("RGBA", layer.size, (0, 0, 0, 0))
+    shadow.paste(Image.new("RGBA", layer.size, (0, 0, 0, 200)), (0, 10),
+                 layer.split()[3])
+    shadow = shadow.filter(ImageFilter.GaussianBlur(10))
+    return np.array(Image.alpha_composite(shadow, layer))
 
 def norm(w):
     return re.sub(r"[^a-z0-9]", "", w.lower())
@@ -176,14 +205,18 @@ def main():
         starts[i] = max(starts[i], starts[i - 1] + 0.15)
     print("Chunk starts:", [(c[0], round(t, 2)) for c, t in zip(chunks, starts)])
 
-    py = TEXT_Y.get(cat, 0.5)
+    cy = TEXT_Y.get(cat, 0.5) * H
+    acc = ACCENT.get(cat, (255, 214, 64))
+    sc = lambda t: 0.88 + 0.12 * min(t / 0.12, 1.0)
     clips = []
     for i, (txt, _) in enumerate(chunks):
         st = starts[i]
         en = starts[i + 1] if i + 1 < len(chunks) else dur
-        arr = text_img(txt)
-        c = (ImageClip(arr).set_start(st).set_duration(max(en - st, 0.15))
-             .set_position(("center", py * H - arr.shape[0] / 2)))
+        arr = text_img(txt, acc)
+        h = arr.shape[0]
+        c = (ImageClip(arr).resize(sc)
+             .set_position(lambda t, h=h: ("center", cy - h * sc(t) / 2))
+             .set_start(st).set_duration(max(en - st, 0.15)))
         clips.append(c)
 
     bgm = audio_loop(AudioFileClip(pick("music", ["mp3", "m4a", "wav", "ogg"])),
