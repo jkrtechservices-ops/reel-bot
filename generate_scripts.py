@@ -3,7 +3,9 @@ import requests
 
 KEY = os.environ["GROQ_API_KEY"]
 MODEL = os.environ.get("GROQ_MODEL") or "openai/gpt-oss-120b"
+SEARCH_MODEL = os.environ.get("GROQ_SEARCH_MODEL") or "groq/compound-mini"
 HEADER = "Psychology Says:"
+INSPO_SITES = ["reddit.com", "quora.com", "pinterest.com", "goodreads.com"]
 
 TOPICS = {
     "dark": [
@@ -125,16 +127,21 @@ def body_of(s):
         ls = ls[:-1]
     return ls
 
-def ask(system, user):
+def ask(system, user, model=None, temp=0.9, max_tokens=3500, extra=None, soft=False):
+    model = model or MODEL
+    body = {"model": model,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": user}],
+            "temperature": temp, "max_completion_tokens": max_tokens}
+    if "gpt-oss" in model:
+        body["reasoning_effort"] = "low"
+    if extra:
+        body.update(extra)
     for attempt in range(6):
         r = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": "Bearer " + KEY, "Content-Type": "application/json"},
-            json={"model": MODEL,
-                  "messages": [{"role": "system", "content": system},
-                               {"role": "user", "content": user}],
-                  "temperature": 0.7, "max_completion_tokens": 2500},
-            timeout=120)
+            json=body, timeout=120)
         if r.status_code == 429:
             m = re.search(r"try again in ([0-9.]+)s", r.text)
             wait = float(m.group(1)) + 3 if m else 20
@@ -142,9 +149,36 @@ def ask(system, user):
             time.sleep(wait)
             continue
         if r.status_code != 200:
+            if soft:
+                print("Groq soft error %s: %s" % (r.status_code, r.text[:200]))
+                return ""
             raise SystemExit("Groq error %s: %s" % (r.status_code, r.text[:300]))
-        return r.json()["choices"][0]["message"]["content"]
+        return r.json()["choices"][0]["message"].get("content") or ""
+    if soft:
+        return ""
     raise SystemExit("Groq rate limit kept blocking us, try again in a few minutes")
+
+def get_inspiration(cat):
+    """Search the web for what is already going viral. Used only as a feeling guide."""
+    angle = random.choice(TOPICS[cat])
+    q = ("Search the web for short psychology-fact or dark-psychology quotes about %s "
+         "(for example: %s) that people on Reddit, Instagram reels and Pinterest are "
+         "sharing and relating to a lot. List 10 of them, one per line, in plain simple "
+         "English. No commentary, no numbering, no links." % (CAT_DESC[cat], angle))
+    try:
+        out = ask("You collect short viral quotes. Output only the lines.", q,
+                  model=SEARCH_MODEL, temp=0.3, max_tokens=1200, soft=True,
+                  extra={"search_settings": {"include_domains": INSPO_SITES}})
+    except Exception as e:
+        print("Inspiration search failed:", e)
+        return []
+    lines = []
+    for l in out.replace("\r", "").split("\n"):
+        l = tidy(re.sub(r"^[\s\-\*\d\.\)]+", "", l)).strip("\"' ")
+        if 25 <= len(l) <= 220 and "http" not in l:
+            lines.append(l)
+    print("Inspiration for %s: %d lines" % (cat, len(lines)))
+    return lines[:12]
 
 def tidy(t):
     t = str(t)
@@ -164,14 +198,14 @@ def parse(text):
         "#psychology #mindset #selfgrowth #relationships #mentalstrength"
     return lines, caption, tags
 
-def check(lines, caption, prev_texts, prev_lines, prev_last):
+def check(lines, caption, prev_texts, prev_lines, prev_last, insp=()):
     """Return None if the script is fine, else the reason it was rejected."""
     lines = strip_header(lines)
     if not 5 <= len(lines) <= 16:
         return "use 5 to 16 short lines (you used %d)" % len(lines)
     total = len(" ".join(lines).split())
-    if not 40 <= total <= 95:
-        return "the script must be 40 to 95 words (you used %d)" % total
+    if not 35 <= total <= 85:
+        return "the script must be 35 to 85 words (you used %d)" % total
     for l in lines:
         n = len(l.split())
         if n < 2 or n > 12:
@@ -188,6 +222,10 @@ def check(lines, caption, prev_texts, prev_lines, prev_last):
                 return "do not use the cliche word or phrase '%s', say it in plain simple words: %s" % (b, l)
         if len(fold(l).split()) >= 4 and fold(l) in prev_lines:
             return "this line was already used before: " + l
+    for l in lines:
+        for s in insp:
+            if difflib.SequenceMatcher(None, fold(l), s).ratio() > 0.8:
+                return "this line is too close to a real quote, write it in your own words: " + l
     if not caption:
         return "caption is missing"
     txt = fold(" ".join(lines))
@@ -208,14 +246,39 @@ def pick_topic(cat, recent):
         return random.choice(fresh)
     return min(pool, key=lambda t: used.index(t) if t in used else -1)
 
-def make_one(recent, examples):
+def parse_many(text):
+    out = []
+    for b in re.split(r"(?im)^\s*#{2,}.*$", text.replace("\r", "")):
+        if "SCRIPT:" in b.upper():
+            try:
+                out.append(parse(b))
+            except Exception:
+                pass
+    return out
+
+def judge(good):
+    if len(good) == 1:
+        return good[0]
+    txt = "\n\n".join("%d)\n%s" % (i + 1, "\n".join(g[0])) for i, g in enumerate(good))
+    out = ask("You are a strict editor of viral Instagram psychology reels.",
+              "Which script would make a viewer think 'this is exactly about me' and send it to "
+              "someone? Prefer a strong first line, one real everyday moment, and a last line that "
+              "stays in the heart. Reply with ONLY the number.\n\n" + txt,
+              temp=0, max_tokens=800, soft=True)
+    m = re.search(r"\d+", out or "")
+    if m and 1 <= int(m.group()) <= len(good):
+        return good[int(m.group()) - 1]
+    return good[0]
+
+def make_one(recent, examples, inspo):
     cat = random.choice(["dark", "brain"])
     topic = pick_topic(cat, recent)
+    insp = inspo.get(cat, [])
+    insp_fold = [fold(x) for x in insp]
 
     prev_texts = [fold(" ".join(body_of(s))) for s in recent]
     prev_texts += [fold(e.replace("\n", " ")) for e in examples]
-    prev_lines = set()
-    prev_last = []
+    prev_lines, prev_last = set(), []
     for s in recent:
         ls = body_of(s)
         prev_lines.update(fold(l) for l in ls)
@@ -226,72 +289,85 @@ def make_one(recent, examples):
         prev_lines.update(fold(l) for l in ls)
         prev_last.append(fold(ls[-1]))
 
-    shown = random.sample(examples, min(6, len(examples)))
-    ex_txt = "\n\n".join("Example %d:\n%s\n%s" % (i + 1, HEADER, e)
-                         for i, e in enumerate(shown))
+    shown = random.sample(examples, min(5, len(examples)))
+    ex_txt = "\n\n".join("Example %d:\n%s\n%s" % (i + 1, HEADER, e) for i, e in enumerate(shown))
     avoid = [" ".join(body_of(s)[:2]) for s in recent[-40:]]
     pname, pdesc = random.choice(PATTERNS)
 
-    system = ("You are a skilled writer of short, natural, spoken psychology scripts for Instagram "
-              "Reels. You write the way a calm, wise friend talks: plain, warm and clear. "
-              "You follow every rule exactly.")
-    base = "Write ONE new script about: " + topic + "\nArea: " + CAT_DESC[cat] + "\n"
-    base += ("\nHere are example scripts. Study how they sound: normal spoken English, full sentences "
-             "that flow across two short lines, one clear idea at a time. Match this style and "
-             "feel. NEVER copy their words, ideas or endings.\n\n" + ex_txt + "\n")
-    base += "\nUse this pattern for the new script: " + pname + ". " + pdesc + "\n"
+    system = ("You write viral Instagram psychology reels in simple English. Your lines make the "
+              "viewer feel 'this is exactly me, how did they know?'. You write like a close friend "
+              "who says the painful truth gently. No lecture, no filler, no advice dump.")
+    base = "Write 5 DIFFERENT scripts. Area: " + CAT_DESC[cat] + ". Starting idea: " + topic + \
+           " (you may move to a more specific situation inside this area).\n"
+    if insp:
+        base += ("\nThese lines are going viral right now. Use them ONLY to feel what makes people "
+                 "relate: the tone, the hook, the sting. NEVER copy their words or reuse their exact "
+                 "idea:\n" + "\n".join("- " + x for x in insp) + "\n")
+    base += ("\nOld examples of our style (do not copy):\n\n" + ex_txt + "\n")
+    base += "\nOne script should follow this pattern: " + pname + ". " + pdesc + "\n"
     base += """
-RULES (all are strict):
-1. Do NOT write the opening "Psychology Says:". Start directly with the first line after it.
-2. Write like the examples: complete, natural sentences, broken into short lines at natural pauses. 6 to 14 lines, each line 2 to 12 words, 45 to 90 words in total. Do not write a list of separate slogans.
-3. Plain everyday words a 12 year old understands. Every sentence must make clear sense on its own. Say what really happens in normal life. No poetic or vague phrases, no big words, no metaphors.
-4. Soft, honest wording (often, sometimes, can, may). No numbers, no statistics, no "studies show", no diagnosis, no advice that hurts or manipulates anyone.
-5. No emojis and no hashtags inside the script.
-6. Take a fresh angle on the topic. Never reuse these earlier openings or ideas:
+WHAT MAKES IT HIT:
+- First line is a hook that stops the scroll and speaks to 'you' or to what 'they' do. Never start with 'People often'.
+- Show one real, small moment (checking the phone, replying late, sitting quiet in a group, being the one who always calls first). Specific beats general.
+- One contrast or twist, like 'They don't miss you, they miss what you did for them.'
+- Last line is short and either stings or comforts. It must feel like a truth, not a slogan.
+- Be direct and sure of yourself. Use at most one 'sometimes' or 'often'.
+
+RULES:
+1. Do NOT write 'Psychology Says:'. Start with the first line after it.
+2. 6 to 12 short lines, each 2 to 12 words, 35 to 85 words in total.
+3. Simple everyday words. Every line must make clear sense. No poetic fog, no words like peace grows, mind settles, space to breathe.
+4. No numbers, no statistics, no 'studies show', no diagnosis, no emojis, no hashtags inside the script.
+5. All 5 scripts must have different openings, situations and endings. Never reuse these earlier openings or ideas:
 """
     base += "\n".join("- " + a for a in avoid) if avoid else "- (none yet)"
     base += """
 
 Reply in exactly this format and nothing else:
+### 1
 SCRIPT:
-(the script lines, one per line)
+(lines, one per line)
 CAPTION:
 (1 to 2 simple sentences ending with a call to save or share)
 HASHTAGS:
-(5 hashtags)"""
+(5 hashtags)
+### 2
+... up to ### 5"""
 
-    reason = None
-    for attempt in range(6):
+    good, notes = [], []
+    for attempt in range(3):
         user = base
-        if reason:
-            user += "\n\nYour last attempt was rejected: " + reason + ". Fix it."
-        try:
-            lines, caption, tags = parse(ask(system, user))
-        except SystemExit:
-            raise
-        except Exception as e:
-            reason = "bad output (" + str(e) + ")"
-            print("retry:", reason)
-            continue
-        reason = check(lines, caption, prev_texts, prev_lines, prev_last)
-        if reason:
-            print("retry:", reason)
-            continue
-        cta = random.choice(CTAS[cat])
-        return {"category": cat, "topic": topic, "tts": "fish",
-                "lines": [HEADER] + strip_header(lines) + [cta],
-                "cta": cta, "caption": caption, "hashtags": tags}
-    return None
+        if notes:
+            user += "\n\nProblems found in the last batch, avoid them: " + "; ".join(notes[:4])
+        cands = parse_many(ask(system, user))
+        notes = []
+        for lines, caption, tags in cands:
+            r = check(lines, caption, prev_texts, prev_lines, prev_last, insp_fold)
+            if r:
+                notes.append(r)
+                print("reject:", r)
+            else:
+                good.append((lines, caption, tags))
+        if good:
+            break
+    if not good:
+        return None
+    lines, caption, tags = judge(good)
+    cta = random.choice(CTAS[cat])
+    return {"category": cat, "topic": topic, "tts": "fish",
+            "lines": [HEADER] + strip_header(lines) + [cta],
+            "cta": cta, "caption": caption, "hashtags": tags}
 
 def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 1
     examples = load_examples()
     print("Loaded examples:", len(examples))
+    inspo = {c: get_inspiration(c) for c in TOPICS}
     for i in range(n):
         if i:
             print("Waiting 25 seconds to stay under the Groq rate limit...")
             time.sleep(25)
-        item = make_one(all_scripts(), examples)
+        item = make_one(all_scripts(), examples, inspo)
         if not item:
             print("Could not make a good script, skipping")
             continue
@@ -301,4 +377,5 @@ def main():
             json.dump(item, f, ensure_ascii=False, indent=2)
         print("Created queue/" + num, "-", item["topic"])
 
-main()
+if __name__ == "__main__":
+    main()
