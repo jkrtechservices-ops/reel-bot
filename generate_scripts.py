@@ -80,23 +80,50 @@ def strip_header(lines):
         return lines[1:]
     return lines
 
-DEFAULT_CTAS = [
-    "Follow for more daily life changing psychology.",
-    "Follow for more daily videos that change how you think.",
-    "Follow for more daily psychology that heals your mind.",
+CTAS = {
+    "dark": [
+        "Follow for more daily psychology about people and relationships.",
+        "Follow for more daily videos that help you understand people.",
+        "Follow for more daily psychology that can change your life.",
+        "Follow for more daily life changing videos.",
+    ],
+    "brain": [
+        "Follow for more daily psychology about your mind and habits.",
+        "Follow for more daily videos that help you understand your mind.",
+        "Follow for more daily psychology that can change your life.",
+        "Follow for more daily life changing videos.",
+    ],
+}
+
+PATTERNS = [
+    ("The more you do X, the less/more Y happens",
+     "Start with 'The more you ___, the ___ you become' (or 'the less ___'). Then 'But when you ___,' "
+     "show the surprising result. Then 'Sometimes, ___' with a deeper reason. "
+     "End with one calm closing sentence that sums it up."),
+    ("Reframe: you are not X, you are just Y",
+     "Start with 'Sometimes, you are not ___.' Then 'You are just ___.' Explain what that does to you "
+     "in two short sentences. Then one plain piece of advice, and a calm closing sentence."),
+    ("Why your brain/mind does X",
+     "Start with 'Your brain/mind often ___' (something people do without noticing). "
+     "Then 'That is why ___.' Then 'You don't need to ___.' Give one small, doable action. "
+     "End with a sentence about the future or about peace."),
+    ("X does not mean Y",
+     "Start with '___ does not mean ___.' Then 'You can ___ without ___.' Then "
+     "'Some people ___, but they still ___.' End with a calm closing sentence."),
+    ("People remember / people often do X",
+     "Start with 'People often ___ more than ___.' Then give a simple everyday example in two short "
+     "sentences. Then 'So ___.' Then 'You never know ___.' End with a gentle closing sentence."),
 ]
+
+BANNED = ["journey", "unlock", "embrace", "navigate", "tapestry", "rewire", "whisper",
+          "dim your", "in a world", "powerful", "transform", "insights", "resonate",
+          "boundaries grow", "speak your truth", "worth is", "vibration"]
 
 def body_of(s):
     ls = strip_header(s.get("lines", []))
     if s.get("cta") and ls and ls[-1] == s["cta"]:
         ls = ls[:-1]
     return ls
-
-def clean_cta(c):
-    c = (c or "").strip()
-    ok = (c and "follow" in c.lower() and 3 <= len(c.split()) <= 14
-          and not re.search(r"[^\x00-\x7F\u2018\u2019]|\d|#", c))
-    return c if ok else random.choice(DEFAULT_CTAS)
 
 def ask(system, user):
     for attempt in range(6):
@@ -106,7 +133,7 @@ def ask(system, user):
             json={"model": MODEL,
                   "messages": [{"role": "system", "content": system},
                                {"role": "user", "content": user}],
-                  "temperature": 0.8, "max_completion_tokens": 2500},
+                  "temperature": 0.7, "max_completion_tokens": 2500},
             timeout=120)
         if r.status_code == 429:
             m = re.search(r"try again in ([0-9.]+)s", r.text)
@@ -127,34 +154,38 @@ def tidy(t):
     return t.strip()
 
 def parse(text):
-    m = re.search(r"\{.*\}", text, re.S)
+    t = text.replace("\r", "")
+    m = re.search(r"SCRIPT:\s*(.*?)\s*CAPTION:\s*(.*?)\s*(?:HASHTAGS:\s*(.*))?$", t, re.S | re.I)
     if not m:
-        raise ValueError("reply was not JSON")
-    d = json.loads(m.group(0))
-    lines = [tidy(x) for x in d["lines"] if tidy(x)]
-    caption = tidy(d.get("caption", ""))
-    tags = str(d.get("hashtags", "")).strip() or \
+        raise ValueError("reply did not follow the SCRIPT / CAPTION / HASHTAGS format")
+    lines = [tidy(x) for x in m.group(1).split("\n") if tidy(x)]
+    caption = tidy(m.group(2).replace("\n", " "))
+    tags = tidy((m.group(3) or "").replace("\n", " ")) or \
         "#psychology #mindset #selfgrowth #relationships #mentalstrength"
-    return lines, caption, tags, clean_cta(tidy(d.get("cta") or ""))
+    return lines, caption, tags
 
 def check(lines, caption, prev_texts, prev_lines, prev_last):
     """Return None if the script is fine, else the reason it was rejected."""
     lines = strip_header(lines)
-    if not 5 <= len(lines) <= 15:
-        return "use 5 to 15 short lines (you used %d)" % len(lines)
+    if not 5 <= len(lines) <= 16:
+        return "use 5 to 16 short lines (you used %d)" % len(lines)
     total = len(" ".join(lines).split())
-    if not 35 <= total <= 90:
-        return "the script must be 35 to 90 words (you used %d)" % total
+    if not 40 <= total <= 95:
+        return "the script must be 40 to 95 words (you used %d)" % total
     for l in lines:
         n = len(l.split())
-        if n < 2 or n > 10:
-            return "every line must be 2 to 10 words, fix this line: " + l
+        if n < 2 or n > 12:
+            return "every line must be 2 to 12 words, fix this line: " + l
         if re.search(r"[^\x00-\x7F\u2018\u2019\u201C\u201D\u2013\u2014]", l):
             return "no emojis or special symbols: " + l
         if re.search(r"[A-Za-z]{16,}", l):
             return "use simpler, shorter words in this line: " + l
         if re.search(r"%|\d|studies|research|scientist|proven|according to", l, re.I):
             return "no numbers, statistics or study claims: " + l
+        low = l.lower()
+        for b in BANNED:
+            if b in low:
+                return "do not use the cliche word or phrase '%s', say it in plain simple words: %s" % (b, l)
         if len(fold(l).split()) >= 4 and fold(l) in prev_lines:
             return "this line was already used before: " + l
     if not caption:
@@ -195,32 +226,39 @@ def make_one(recent, examples):
         prev_lines.update(fold(l) for l in ls)
         prev_last.append(fold(ls[-1]))
 
-    shown = random.sample(examples, min(4, len(examples)))
+    shown = random.sample(examples, min(6, len(examples)))
     ex_txt = "\n\n".join("Example %d:\n%s\n%s" % (i + 1, HEADER, e)
                          for i, e in enumerate(shown))
     avoid = [" ".join(body_of(s)[:2]) for s in recent[-40:]]
+    pname, pdesc = random.choice(PATTERNS)
 
-    system = ("You write short Instagram Reel scripts in the 'Psychology Says' style. "
-              "You follow every rule exactly. Reply with JSON only.")
+    system = ("You are a skilled writer of short, natural, spoken psychology scripts for Instagram "
+              "Reels. You write the way a calm, wise friend talks: plain, warm and clear. "
+              "You follow every rule exactly.")
     base = "Write ONE new script about: " + topic + "\nArea: " + CAT_DESC[cat] + "\n"
-    if ex_txt:
-        base += ("\nThese example scripts show the exact style, rhythm and line length. "
-                 "Match the style, but NEVER copy their words, ideas or endings:\n\n"
-                 + ex_txt + "\n")
+    base += ("\nHere are example scripts. Study how they sound: normal spoken English, full sentences "
+             "that flow across two short lines, one clear idea at a time. Match this style and "
+             "feel. NEVER copy their words, ideas or endings.\n\n" + ex_txt + "\n")
+    base += "\nUse this pattern for the new script: " + pname + ". " + pdesc + "\n"
     base += """
-STRICT RULES:
-1. Write only the lines AFTER the opening "Psychology Says:" (do not include that opening).
-2. 5 to 15 short lines, each line 2 to 10 words, 40 to 90 words in total.
-3. Very simple, everyday English. Short common words. No jargon or psychology terms.
-4. Flow: a relatable observation, then a turn (like "But" or "Sometimes"), then a deeper insight, then a memorable closing line. Make the closing line different from the examples.
-5. Soft, honest wording (often, sometimes, can, may). No numbers, no statistics, no "studies show", no diagnosis, no advice that hurts or manipulates anyone.
-6. No emojis. No hashtags inside the lines.
-7. Also write a "cta": ONE short closing line that starts a follow request linked to this script's idea, 5 to 12 words, must contain the word "Follow", for example "Follow for more daily psychology that changes how you think." Vary the wording.
-8. Pick a fresh angle on the topic. Never reuse these earlier openings or ideas:
+RULES (all are strict):
+1. Do NOT write the opening "Psychology Says:". Start directly with the first line after it.
+2. Write like the examples: complete, natural sentences, broken into short lines at natural pauses. 6 to 14 lines, each line 2 to 12 words, 45 to 90 words in total. Do not write a list of separate slogans.
+3. Plain everyday words a 12 year old understands. Every sentence must make clear sense on its own. Say what really happens in normal life. No poetic or vague phrases, no big words, no metaphors.
+4. Soft, honest wording (often, sometimes, can, may). No numbers, no statistics, no "studies show", no diagnosis, no advice that hurts or manipulates anyone.
+5. No emojis and no hashtags inside the script.
+6. Take a fresh angle on the topic. Never reuse these earlier openings or ideas:
 """
     base += "\n".join("- " + a for a in avoid) if avoid else "- (none yet)"
-    base += ('\n\nReturn exactly this JSON: {"lines": ["..."], "cta": "Follow for more ...", "caption": "1 to 2 simple '
-             'sentences ending with a call to save or share", "hashtags": "#a #b #c #d #e"}')
+    base += """
+
+Reply in exactly this format and nothing else:
+SCRIPT:
+(the script lines, one per line)
+CAPTION:
+(1 to 2 simple sentences ending with a call to save or share)
+HASHTAGS:
+(5 hashtags)"""
 
     reason = None
     for attempt in range(6):
@@ -228,7 +266,7 @@ STRICT RULES:
         if reason:
             user += "\n\nYour last attempt was rejected: " + reason + ". Fix it."
         try:
-            lines, caption, tags, cta = parse(ask(system, user))
+            lines, caption, tags = parse(ask(system, user))
         except SystemExit:
             raise
         except Exception as e:
@@ -239,6 +277,7 @@ STRICT RULES:
         if reason:
             print("retry:", reason)
             continue
+        cta = random.choice(CTAS[cat])
         return {"category": cat, "topic": topic, "tts": "fish",
                 "lines": [HEADER] + strip_header(lines) + [cta],
                 "cta": cta, "caption": caption, "hashtags": tags}
