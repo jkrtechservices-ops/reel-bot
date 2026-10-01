@@ -80,29 +80,62 @@ def strip_header(lines):
         return lines[1:]
     return lines
 
+DEFAULT_CTAS = [
+    "Follow for more daily life changing psychology.",
+    "Follow for more daily videos that change how you think.",
+    "Follow for more daily psychology that heals your mind.",
+]
+
+def body_of(s):
+    ls = strip_header(s.get("lines", []))
+    if s.get("cta") and ls and ls[-1] == s["cta"]:
+        ls = ls[:-1]
+    return ls
+
+def clean_cta(c):
+    c = (c or "").strip()
+    ok = (c and "follow" in c.lower() and 3 <= len(c.split()) <= 14
+          and not re.search(r"[^\x00-\x7F\u2018\u2019]|\d|#", c))
+    return c if ok else random.choice(DEFAULT_CTAS)
+
 def ask(system, user):
-    r = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        headers={"Authorization": "Bearer " + KEY, "Content-Type": "application/json"},
-        json={"model": MODEL,
-              "messages": [{"role": "system", "content": system},
-                           {"role": "user", "content": user}],
-              "temperature": 0.8, "max_completion_tokens": 2500},
-        timeout=120)
-    if r.status_code != 200:
-        raise SystemExit("Groq error %s: %s" % (r.status_code, r.text[:300]))
-    return r.json()["choices"][0]["message"]["content"]
+    for attempt in range(6):
+        r = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": "Bearer " + KEY, "Content-Type": "application/json"},
+            json={"model": MODEL,
+                  "messages": [{"role": "system", "content": system},
+                               {"role": "user", "content": user}],
+                  "temperature": 0.8, "max_completion_tokens": 2500},
+            timeout=120)
+        if r.status_code == 429:
+            m = re.search(r"try again in ([0-9.]+)s", r.text)
+            wait = float(m.group(1)) + 3 if m else 20
+            print("Rate limit reached, waiting %.0f seconds..." % wait)
+            time.sleep(wait)
+            continue
+        if r.status_code != 200:
+            raise SystemExit("Groq error %s: %s" % (r.status_code, r.text[:300]))
+        return r.json()["choices"][0]["message"]["content"]
+    raise SystemExit("Groq rate limit kept blocking us, try again in a few minutes")
+
+def tidy(t):
+    t = str(t)
+    for a in "\u2010\u2011\u2012":
+        t = t.replace(a, "-")
+    t = t.replace("\u00a0", " ").replace("\u202f", " ").replace("\u2026", "...")
+    return t.strip()
 
 def parse(text):
     m = re.search(r"\{.*\}", text, re.S)
     if not m:
         raise ValueError("reply was not JSON")
     d = json.loads(m.group(0))
-    lines = [str(x).strip() for x in d["lines"] if str(x).strip()]
-    caption = str(d.get("caption", "")).strip()
+    lines = [tidy(x) for x in d["lines"] if tidy(x)]
+    caption = tidy(d.get("caption", ""))
     tags = str(d.get("hashtags", "")).strip() or \
         "#psychology #mindset #selfgrowth #relationships #mentalstrength"
-    return lines, caption, tags
+    return lines, caption, tags, clean_cta(tidy(d.get("cta") or ""))
 
 def check(lines, caption, prev_texts, prev_lines, prev_last):
     """Return None if the script is fine, else the reason it was rejected."""
@@ -148,12 +181,12 @@ def make_one(recent, examples):
     cat = random.choice(["dark", "brain"])
     topic = pick_topic(cat, recent)
 
-    prev_texts = [fold(" ".join(strip_header(s.get("lines", [])))) for s in recent]
+    prev_texts = [fold(" ".join(body_of(s))) for s in recent]
     prev_texts += [fold(e.replace("\n", " ")) for e in examples]
     prev_lines = set()
     prev_last = []
     for s in recent:
-        ls = strip_header(s.get("lines", []))
+        ls = body_of(s)
         prev_lines.update(fold(l) for l in ls)
         if ls:
             prev_last.append(fold(ls[-1]))
@@ -162,10 +195,10 @@ def make_one(recent, examples):
         prev_lines.update(fold(l) for l in ls)
         prev_last.append(fold(ls[-1]))
 
-    shown = random.sample(examples, min(5, len(examples)))
+    shown = random.sample(examples, min(4, len(examples)))
     ex_txt = "\n\n".join("Example %d:\n%s\n%s" % (i + 1, HEADER, e)
                          for i, e in enumerate(shown))
-    avoid = [" ".join(strip_header(s.get("lines", []))[:2]) for s in recent[-40:]]
+    avoid = [" ".join(body_of(s)[:2]) for s in recent[-40:]]
 
     system = ("You write short Instagram Reel scripts in the 'Psychology Says' style. "
               "You follow every rule exactly. Reply with JSON only.")
@@ -182,10 +215,11 @@ STRICT RULES:
 4. Flow: a relatable observation, then a turn (like "But" or "Sometimes"), then a deeper insight, then a memorable closing line. Make the closing line different from the examples.
 5. Soft, honest wording (often, sometimes, can, may). No numbers, no statistics, no "studies show", no diagnosis, no advice that hurts or manipulates anyone.
 6. No emojis. No hashtags inside the lines.
-7. Pick a fresh angle on the topic. Never reuse these earlier openings or ideas:
+7. Also write a "cta": ONE short closing line that starts a follow request linked to this script's idea, 5 to 12 words, must contain the word "Follow", for example "Follow for more daily psychology that changes how you think." Vary the wording.
+8. Pick a fresh angle on the topic. Never reuse these earlier openings or ideas:
 """
     base += "\n".join("- " + a for a in avoid) if avoid else "- (none yet)"
-    base += ('\n\nReturn exactly this JSON: {"lines": ["..."], "caption": "1 to 2 simple '
+    base += ('\n\nReturn exactly this JSON: {"lines": ["..."], "cta": "Follow for more ...", "caption": "1 to 2 simple '
              'sentences ending with a call to save or share", "hashtags": "#a #b #c #d #e"}')
 
     reason = None
@@ -194,7 +228,7 @@ STRICT RULES:
         if reason:
             user += "\n\nYour last attempt was rejected: " + reason + ". Fix it."
         try:
-            lines, caption, tags = parse(ask(system, user))
+            lines, caption, tags, cta = parse(ask(system, user))
         except SystemExit:
             raise
         except Exception as e:
@@ -206,15 +240,18 @@ STRICT RULES:
             print("retry:", reason)
             continue
         return {"category": cat, "topic": topic, "tts": "fish",
-                "lines": [HEADER] + strip_header(lines),
-                "caption": caption, "hashtags": tags}
+                "lines": [HEADER] + strip_header(lines) + [cta],
+                "cta": cta, "caption": caption, "hashtags": tags}
     return None
 
 def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 1
     examples = load_examples()
     print("Loaded examples:", len(examples))
-    for _ in range(n):
+    for i in range(n):
+        if i:
+            print("Waiting 25 seconds to stay under the Groq rate limit...")
+            time.sleep(25)
         item = make_one(all_scripts(), examples)
         if not item:
             print("Could not make a good script, skipping")
@@ -224,6 +261,5 @@ def main():
         with open("queue/%s/script.json" % num, "w", encoding="utf-8") as f:
             json.dump(item, f, ensure_ascii=False, indent=2)
         print("Created queue/" + num, "-", item["topic"])
-        time.sleep(2)
 
 main()
