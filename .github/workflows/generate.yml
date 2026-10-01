@@ -1,0 +1,30 @@
+name: generate-scripts
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "How many scripts"
+        default: "7"
+  schedule:
+    - cron: "0 3 * * 0"
+permissions:
+  contents: write
+jobs:
+  gen:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests
+      - run: python generate_scripts.py ${{ github.event.inputs.count || '7' }}
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
+      - run: |
+          git config user.name "reel-bot"
+          git config user.email "reel-bot@users.noreply.github.com"
+          git add queue
+          git commit -m "Add new scripts" || echo "nothing to commit"
+          git push
