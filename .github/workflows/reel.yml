@@ -9,8 +9,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install "moviepy==1.0.3" "pillow==9.5.0" "numpy<2" faster-whisper
+      - run: pip install "moviepy==1.0.3" "pillow==9.5.0" "numpy<2" requests faster-whisper
       - run: python make_reel.py
+        env:
+          FISH_API_KEY: ${{ secrets.FISH_API_KEY }}
+          FISH_VOICE_ID: ${{ secrets.FISH_VOICE_ID }}
       - uses: actions/upload-artifact@v4
         with:
           name: reel
