@@ -172,7 +172,8 @@ def whisper_times(words_txt, lines, audio_path, total):
         return word_starts(words_txt, [], total)
 
 def main():
-    folder = sys.argv[1] if len(sys.argv) > 1 else sorted(glob.glob("queue/*/"))[0]
+    folder = ("queue/%03d" % int(sys.argv[1])) if len(sys.argv) > 1 and sys.argv[1].strip().isdigit() \
+             else sorted(glob.glob("queue/*/"))[-1]
     data = json.load(open(os.path.join(folder, "script.json"), encoding="utf-8"))
     cat = data.get("category", "dark")
     lines = data["lines"]
