@@ -256,6 +256,8 @@ def check(lines, caption, prev_texts, prev_lines, prev_last, insp=()):
             return "use simpler, shorter words in this line: " + l
         if re.search(r"%|\d|studies|research|scientist|proven|according to", l, re.I):
             return "no numbers, statistics or study claims: " + l
+        if re.search(r"(?<![A-Za-z])I(?![a-z])", l) or re.search(r"\b(she|he|her|his|him|my|me|we|our|us)\b", l, re.I):
+            return "speak only to 'you' or about 'they' / 'people'. Never use I, me, my, she, he, her, we. Fix: " + l
         low = l.lower()
         for b in BANNED:
             if b in low:
@@ -266,6 +268,8 @@ def check(lines, caption, prev_texts, prev_lines, prev_last, insp=()):
         for s in insp:
             if difflib.SequenceMatcher(None, fold(l), s).ratio() > 0.8:
                 return "this line is too close to a real quote, write it in your own words: " + l
+    if len(re.findall(r"\b(you|your|you're|you've)\b", " ".join(lines), re.I)) < 2:
+        return "talk to the viewer: use 'you' or 'your' at least twice"
     if not caption:
         return "caption is missing"
     txt = fold(" ".join(lines))
@@ -284,7 +288,7 @@ def polish(lines, caption, prev_texts, prev_lines, prev_last, insp_fold):
               "Rewrite this script so it hits harder. Replace every vague or poetic line with a "
               "plain, concrete one a real person would say or feel. Keep the same idea, the same "
               "number of lines (+/- 1), each line 2 to 12 words, simple English, no numbers, no "
-              "cliches. The last line must sting or comfort. Reply with ONLY the lines, one per "
+              "cliches. Keep speaking only to 'you' (never I, she, he) and keep every line connected to the previous one. The last line must sting or comfort. Reply with ONLY the lines, one per "
               "line.\n\n" + "\n".join(lines), temp=0.6, max_tokens=600, soft=True)
     new = [tidy(re.sub(r"^[\s\-\*\d\.\)]+", "", x)) for x in out.replace("\r", "").split("\n") if tidy(x)]
     if new and check(new, caption, prev_texts, prev_lines, prev_last, insp_fold) is None:
@@ -349,7 +353,9 @@ def make_one(recent, examples, inspo):
 
     system = ("You write viral Instagram psychology reels in simple English. Your lines make the "
               "viewer feel 'this is exactly me, how did they know?'. You write like a close friend "
-              "who says the painful truth gently. No lecture, no filler, no advice dump.")
+              "who says the painful truth gently. You ALWAYS speak to the viewer as 'you' (or about 'they'). "
+              "Never tell a story about 'I', 'she' or 'he'. Every line must connect to the line before it. "
+              "No lecture, no filler, no advice dump.")
     base = "Write 5 DIFFERENT scripts. Area: " + CAT_DESC[cat] + ". Starting idea: " + topic + \
            " (you may move to a more specific situation inside this area).\n"
     if insp:
@@ -359,12 +365,13 @@ def make_one(recent, examples, inspo):
     base += ("\nOld examples of our style (do not copy):\n\n" + ex_txt + "\n")
     base += "\nOne script should follow this pattern: " + pname + ". " + pdesc + "\n"
     base += """
-WHAT MAKES IT HIT:
-- First line is a hook that stops the scroll and speaks to 'you' or to what 'they' do. Never start with 'People often'.
-- Show one real, small moment (checking the phone, replying late, sitting quiet in a group, being the one who always calls first). Specific beats general.
-- One contrast or twist, like 'They don't miss you, they miss what you did for them.'
-- Last line is short and either stings or comforts. It must feel like a truth, not a slogan.
-- Be direct and sure of yourself. Use at most one 'sometimes' or 'often'.
+WHAT MAKES IT HIT (follow this order):
+1. HOOK: one thing 'you' do or feel, that the viewer secretly recognises. Never start with 'People often'.
+2. MOMENT: one small everyday situation, told only with 'you' or 'they' (checking the phone, replying late, being the one who always calls first). No he, she, I, names.
+3. WHY: one plain line that explains the psychology behind it ('Your brain ...', 'That is why ...', 'Because ...'). This is what makes it feel like real psychology.
+4. TWIST: one contrast, like 'They don't miss you, they miss what you did for them.'
+5. LAST LINE: short, either stings or comforts. A truth, not a slogan.
+- Every line must follow logically from the previous one. No random details. Be direct and sure of yourself.
 
 RULES:
 1. Do NOT write 'Psychology Says:'. Start with the first line after it.
