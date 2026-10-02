@@ -1,0 +1,4 @@
+// Yahan scripts paste karo. Ek script = ek block. Do scripts ke beech ek line mein --- likho.
+// Pehli line mein dark ya brain likh sakte ho (na likho to bot khud samajh leta hai).
+// Optional lines: Caption: ...   Hashtags: ...
+// Commit karte hi scripts queue mein chali jayengi aur ye file khali ho jayegi.
