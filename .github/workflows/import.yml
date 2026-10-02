@@ -1,0 +1,24 @@
+name: import-scripts
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "inbox.txt"
+permissions:
+  contents: write
+jobs:
+  imp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python import_scripts.py
+      - name: Save scripts
+        run: |
+          git config user.name "reel-bot"
+          git config user.email "reel-bot@users.noreply.github.com"
+          git add queue inbox.txt
+          git commit -m "Import scripts" || echo "nothing to commit"
+          git push
