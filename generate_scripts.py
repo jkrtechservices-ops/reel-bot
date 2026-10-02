@@ -119,7 +119,8 @@ PATTERNS = [
 
 BANNED = ["journey", "unlock", "embrace", "navigate", "tapestry", "rewire", "whisper",
           "dim your", "in a world", "powerful", "transform", "insights", "resonate",
-          "boundaries grow", "speak your truth", "worth is", "vibration"]
+          "boundaries grow", "speak your truth", "worth is", "vibration",
+          "peace", "space to breathe", "heart becomes", "quiet act", "honor your", "gentle", "mind settles", "kindest"]
 
 def body_of(s):
     ls = strip_header(s.get("lines", []))
@@ -158,27 +159,66 @@ def ask(system, user, model=None, temp=0.9, max_tokens=3500, extra=None, soft=Fa
         return ""
     raise SystemExit("Groq rate limit kept blocking us, try again in a few minutes")
 
-def get_inspiration(cat):
-    """Search the web for what is already going viral. Used only as a feeling guide."""
-    angle = random.choice(TOPICS[cat])
-    q = ("Search the web for short psychology-fact or dark-psychology quotes about %s "
-         "(for example: %s) that people on Reddit, Instagram reels and Pinterest are "
-         "sharing and relating to a lot. List 10 of them, one per line, in plain simple "
-         "English. No commentary, no numbering, no links." % (CAT_DESC[cat], angle))
-    try:
-        out = ask("You collect short viral quotes. Output only the lines.", q,
-                  model=SEARCH_MODEL, temp=0.3, max_tokens=1200, soft=True,
-                  extra={"search_settings": {"include_domains": INSPO_SITES}})
-    except Exception as e:
-        print("Inspiration search failed:", e)
+SUBS = {
+    "dark": ["DarkPsychology101", "psychologyfacts", "PsychologicalTricks"],
+    "brain": ["psychologyfacts", "selfimprovement", "getdisciplined"],
+}
+
+def reddit_lines(cat):
+    """Best effort: top posts of the week from public subreddits. Silently skipped if blocked."""
+    out = []
+    for sub in SUBS[cat]:
+        try:
+            r = requests.get("https://www.reddit.com/r/%s/top.json?t=week&limit=30" % sub,
+                             headers={"User-Agent": "reel-bot/1.0 (personal project)"}, timeout=20)
+            if r.status_code != 200:
+                print("reddit %s: status %s (skipped)" % (sub, r.status_code))
+                continue
+            for c in r.json()["data"]["children"]:
+                t = tidy(c["data"].get("title", ""))
+                if 30 <= len(t) <= 170 and "?" not in t and "http" not in t \
+                        and not re.match(r"(?i)^(i |my |aita|am i|how |why |what )", t):
+                    out.append(t)
+        except Exception as e:
+            print("reddit %s failed: %s" % (sub, e))
+    print("Reddit lines for %s: %d" % (cat, len(out)))
+    return out
+
+def local_bank():
+    """Lines you paste yourself into style/viral.txt (one per line, # = comment)."""
+    p = "style/viral.txt"
+    if not os.path.exists(p):
         return []
-    lines = []
-    for l in out.replace("\r", "").split("\n"):
-        l = tidy(re.sub(r"^[\s\-\*\d\.\)]+", "", l)).strip("\"' ")
-        if 25 <= len(l) <= 220 and "http" not in l:
-            lines.append(l)
+    return [tidy(l) for l in open(p, encoding="utf-8").read().split("\n")
+            if l.strip() and not l.strip().startswith("#")]
+
+def get_inspiration(cat):
+    """Collect what is already going viral. Used only as a feeling guide, never copied."""
+    lines = reddit_lines(cat)
+    lines += local_bank()
+    if len(lines) < 8:
+        for dom in (INSPO_SITES, None):
+            angle = random.choice(TOPICS[cat])
+            q = ("Search the web for short psychology-fact or dark-psychology quotes about %s "
+                 "(for example: %s) that people on Reddit, Instagram reels and Pinterest are "
+                 "sharing and relating to a lot. List 10 of them, one per line, in plain simple "
+                 "English. No commentary, no numbering, no links." % (CAT_DESC[cat], angle))
+            extra = {"search_settings": {"include_domains": dom}} if dom else None
+            try:
+                out = ask("You collect short viral quotes. Output only the lines.", q,
+                          model=SEARCH_MODEL, temp=0.3, max_tokens=1200, soft=True, extra=extra)
+            except BaseException as e:
+                print("Inspiration search failed:", e)
+                continue
+            for l in out.replace("\r", "").split("\n"):
+                l = tidy(re.sub(r"^[\s\-\*\d\.\)]+", "", l)).strip("\"' ")
+                if 25 <= len(l) <= 220 and "http" not in l:
+                    lines.append(l)
+            if len(lines) >= 8:
+                break
+    random.shuffle(lines)
     print("Inspiration for %s: %d lines" % (cat, len(lines)))
-    return lines[:12]
+    return lines[:14]
 
 def tidy(t):
     t = str(t)
@@ -237,6 +277,19 @@ def check(lines, caption, prev_texts, prev_lines, prev_last, insp=()):
         if difflib.SequenceMatcher(None, last, p).ratio() > 0.7:
             return "the closing line is too similar to an earlier closing line"
     return None
+
+def polish(lines, caption, prev_texts, prev_lines, prev_last, insp_fold):
+    """One cheap rewrite: make vague lines concrete. Keeps the old version if the rewrite fails the checks."""
+    out = ask("You are a sharp editor of viral Instagram psychology reels.",
+              "Rewrite this script so it hits harder. Replace every vague or poetic line with a "
+              "plain, concrete one a real person would say or feel. Keep the same idea, the same "
+              "number of lines (+/- 1), each line 2 to 12 words, simple English, no numbers, no "
+              "cliches. The last line must sting or comfort. Reply with ONLY the lines, one per "
+              "line.\n\n" + "\n".join(lines), temp=0.6, max_tokens=600, soft=True)
+    new = [tidy(re.sub(r"^[\s\-\*\d\.\)]+", "", x)) for x in out.replace("\r", "").split("\n") if tidy(x)]
+    if new and check(new, caption, prev_texts, prev_lines, prev_last, insp_fold) is None:
+        return new
+    return lines
 
 def pick_topic(cat, recent):
     pool = TOPICS[cat]
@@ -353,6 +406,7 @@ HASHTAGS:
     if not good:
         return None
     lines, caption, tags = judge(good)
+    lines = polish(lines, caption, prev_texts, prev_lines, prev_last, insp_fold)
     cta = random.choice(CTAS[cat])
     return {"category": cat, "topic": topic, "tts": "fish",
             "lines": [HEADER] + strip_header(lines) + [cta],
