@@ -1,6 +1,10 @@
 name: import-scripts
 on:
   workflow_dispatch:
+    inputs:
+      clear_queue:
+        description: "Type yes to delete ALL old scripts in queue first"
+        default: "no"
   push:
     paths:
       - "inbox.txt"
@@ -14,11 +18,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - name: Clear old queue
+        if: github.event.inputs.clear_queue == 'yes'
+        run: rm -rf queue/*
       - run: python import_scripts.py
       - name: Save scripts
         run: |
           git config user.name "reel-bot"
           git config user.email "reel-bot@users.noreply.github.com"
-          git add queue inbox.txt
+          git add -A queue inbox.txt
           git commit -m "Import scripts" || echo "nothing to commit"
+          git pull --rebase || true
           git push
