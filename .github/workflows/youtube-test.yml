@@ -1,0 +1,48 @@
+name: youtube-test
+on:
+  workflow_dispatch:
+    inputs:
+      privacy:
+        description: "private, unlisted or public"
+        default: "unlisted"
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: pip install requests
+      - name: Make a 6 second test video
+        run: |
+          ffmpeg -y -loglevel error -f lavfi -i color=c=0x14202b:s=1080x1920:d=6 -f lavfi -i sine=frequency=330:duration=6 -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest test.mp4
+      - name: Make a sample script
+        run: |
+          cat > test_script.json <<'EOF'
+          {
+            "category": "dark",
+            "topic": "chasing someone's attention",
+            "lines": [
+              "Psychology Says:",
+              "The more you chase someone's attention,",
+              "the less they may value it.",
+              "But when you stop chasing,",
+              "they suddenly notice your absence.",
+              "Follow for more daily psychology about people and relationships."
+            ],
+            "cta": "Follow for more daily psychology about people and relationships.",
+            "caption": "Save this for later.",
+            "hashtags": "#psychology #relationships #mindset"
+          }
+          EOF
+      - name: Upload to YouTube
+        run: python upload_youtube.py test.mp4 test_script.json "${{ github.event.inputs.privacy || 'unlisted' }}"
+        env:
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
