@@ -1,0 +1,83 @@
+name: long-video
+on:
+  # Daily schedule is OFF until the test passes. To turn on, remove the two
+  # "#" signs in front of the next two lines.
+  # schedule:
+  #   - cron: "0 11 * * *"
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Days to build it in (test: 1, normal: 5)"
+        default: "5"
+      privacy:
+        description: "private, unlisted or public"
+        default: "private"
+      upload:
+        description: "Upload to YouTube when finished (true or false)"
+        default: "true"
+      fresh:
+        description: "true = throw away an unfinished video and start a new one"
+        default: "false"
+permissions:
+  contents: write
+concurrency:
+  group: long-video
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ffmpeg and fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y fonts-montserrat || true
+      - run: pip install pillow requests
+      - name: Restore unfinished video
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: long-state-none
+          restore-keys: long-state-
+      - name: Build next part
+        run: python long_video.py
+        env:
+          DAYS: ${{ github.event.inputs.days || '5' }}
+          PRIVACY: ${{ github.event.inputs.privacy || 'public' }}
+          UPLOAD: ${{ github.event.inputs.upload || 'true' }}
+          FRESH: ${{ github.event.inputs.fresh || 'false' }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
+          FISH_API_KEY: ${{ secrets.FISH_API_KEY }}
+          FISH_VOICE_ID: ${{ secrets.FISH_VOICE_ID }}
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+      - name: Remove finished script
+        if: success() && hashFiles('out/used_script.txt') != ''
+        run: |
+          F=$(cat out/used_script.txt)
+          git config user.name "reel-bot"
+          git config user.email "reel-bot@users.noreply.github.com"
+          git rm -q "$F"
+          git commit -m "Used long script"
+          git pull --rebase || true
+          git push
+      - name: Save progress
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: long-state-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: long-video
+          path: out/long.mp4
+          if-no-files-found: ignore
