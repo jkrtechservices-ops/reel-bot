@@ -10,7 +10,7 @@ W, H = 1080, 1920
 TEXT_Y = {"dark": 0.80, "brain": 0.15}
 ACCENT = {"dark": (120, 220, 255), "brain": (255, 214, 64)}
 UPPER = True
-MUSIC_VOL = 0.15
+MUSIC_VOL = 0.35
 MAX_WORDS = 3
 
 def find_font():
