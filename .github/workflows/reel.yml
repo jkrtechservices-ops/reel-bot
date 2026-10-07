@@ -1,6 +1,13 @@
 name: reel
 on:
   workflow_dispatch:
+    inputs:
+      upload:
+        description: "Upload to YouTube after making the reel (true or false)"
+        default: "true"
+      privacy:
+        description: "private, unlisted or public"
+        default: "private"
 permissions:
   contents: write
 jobs:
@@ -35,6 +42,15 @@ jobs:
         with:
           name: reel
           path: out/reel.mp4
+      - name: Upload to YouTube
+        if: ${{ github.event.inputs.upload != 'false' }}
+        run: python upload_youtube.py out/reel.mp4 queue/${{ steps.pick.outputs.num }}/script.json "${{ github.event.inputs.privacy || 'private' }}"
+        env:
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
       - name: Remove used script
         run: |
           git config user.name "reel-bot"
