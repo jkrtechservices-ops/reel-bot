@@ -8,6 +8,23 @@ GROQ_MODEL = os.environ.get("GROQ_MODEL") or "openai/gpt-oss-120b"
 SYNTHETIC = (os.environ.get("YT_SYNTHETIC") or "true").lower() == "true"
 
 
+DISCLAIMER = ("Disclaimer: This video is for educational and entertainment purposes only and is not "
+              "professional, medical or mental health advice. Narration is AI-generated. Background "
+              "music is royalty-free from the YouTube Audio Library. All rights reserved.")
+
+
+def add_footer(desc):
+    lines = desc.rstrip().split("\n")
+    tag_line = ""
+    if lines and lines[-1].strip().startswith("#"):
+        tag_line = lines.pop().strip()
+    body = "\n".join(lines).rstrip()
+    out = body + "\n\n" + DISCLAIMER
+    if tag_line:
+        out += "\n\n" + tag_line
+    return out
+
+
 def clean(t, limit):
     t = re.sub(r"[<>]", "", str(t)).strip()
     return t[:limit].rstrip()
@@ -61,7 +78,9 @@ def make_meta(script):
         "- TITLE: at most 65 characters, put the main topic keyword near the start, make people "
         "curious, stay honest and simple, no emojis, no ALL CAPS words, no quotation marks.\n"
         "- DESCRIPTION: line 1 (under 120 characters) states the main idea with the key words "
-        "people would search. Then 2 or 3 simple sentences about the idea (do not copy the script). "
+        "people would search. Then a paragraph of 4 to 6 simple sentences (about 70 to 110 words) "
+        "explaining the idea in a warm, relatable way and repeating the main keywords naturally "
+        "(do not copy the script). Then one question line asking viewers to comment their thoughts. "
         "Then the line: Follow for daily psychology videos. Then a last line with exactly 3 hashtags: "
         "#Shorts then 2 relevant hashtags.\n"
         "- TAGS: 8 to 12 search keywords separated by commas, plain English.\n"
@@ -72,7 +91,7 @@ def make_meta(script):
         r = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
             headers={"Authorization": "Bearer " + GROQ_KEY, "Content-Type": "application/json"},
-            json={"model": GROQ_MODEL, "temperature": 0.6, "max_completion_tokens": 1500,
+            json={"model": GROQ_MODEL, "temperature": 0.6, "max_completion_tokens": 2500,
                   "messages": [{"role": "user", "content": prompt}]}, timeout=120)
         r.raise_for_status()
         txt = r.json()["choices"][0]["message"]["content"]
@@ -132,6 +151,7 @@ def main():
     privacy = (sys.argv[3] if len(sys.argv) > 3 else os.environ.get("YT_PRIVACY") or "public").lower()
     script = json.load(open(script_path, encoding="utf-8"))
     meta = make_meta(script)
+    meta["description"] = add_footer(meta["description"])
     print("TITLE:", meta["title"])
     print("DESCRIPTION:\n" + meta["description"])
     print("TAGS:", ", ".join(meta["tags"]))
