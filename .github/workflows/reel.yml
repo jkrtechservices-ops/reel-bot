@@ -1,5 +1,7 @@
 name: reel
 on:
+  schedule:
+    - cron: "30 13 * * *"
   workflow_dispatch:
     inputs:
       upload:
@@ -44,7 +46,7 @@ jobs:
           path: out/reel.mp4
       - name: Upload to YouTube
         if: ${{ github.event.inputs.upload != 'false' }}
-        run: python upload_youtube.py out/reel.mp4 queue/${{ steps.pick.outputs.num }}/script.json "${{ github.event.inputs.privacy || 'private' }}"
+        run: python upload_youtube.py out/reel.mp4 queue/${{ steps.pick.outputs.num }}/script.json "${{ github.event.inputs.privacy || 'public' }}"
         env:
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
