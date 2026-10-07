@@ -26,9 +26,31 @@ def find_font():
 FONT = find_font()
 print("Font:", FONT)
 
-def pick(folder, exts):
-    files = [f for e in exts for f in glob.glob(os.path.join(folder, "*." + e))]
-    return random.choice(files)
+def pick(folder, exts, num=0, name=None, tag=None):
+    """Pick a file for this script (not random): the script can name one
+    ("background"/"music" in script.json), otherwise it follows the script
+    text (tag) and then rotates by script number so reels differ."""
+    files = sorted(f for e in exts for f in glob.glob(os.path.join(folder, "*." + e)))
+    if name:
+        hit = [f for f in files if name.lower() in os.path.basename(f).lower()]
+        if hit:
+            return hit[0]
+    if tag:
+        hit = [f for f in files if tag in os.path.basename(f).lower()]
+        if hit:
+            files = hit
+    return files[num % len(files)]
+
+REL_WORDS = {"relationship", "relationships", "love", "partner", "ex", "dating",
+             "attention", "chase", "chasing", "toxic", "breakup", "heart",
+             "miss", "text", "texting", "friend", "friends", "people",
+             "boundaries", "respect", "ignore", "ignored", "trust", "jealous"}
+
+def music_tag(data):
+    words = re.findall(r"[a-z]+", (" ".join(data["lines"]) + " " +
+                       data.get("topic", "")).lower())
+    hits = sum(1 for w in words if w in REL_WORDS)
+    return "relationship" if hits >= 2 else "psychology"
 
 def text_img(text, accent, size=100, max_w=920):
     font = ImageFont.truetype(FONT, size)
@@ -176,6 +198,7 @@ def main():
              else sorted(glob.glob("queue/*/"))[-1]
     data = json.load(open(os.path.join(folder, "script.json"), encoding="utf-8"))
     cat = data.get("category", "dark")
+    num = int(os.path.basename(folder.rstrip("/")))
     lines = data["lines"]
     words_txt = " ".join(lines).split()
     os.makedirs("out", exist_ok=True)
@@ -192,7 +215,8 @@ def main():
     print("Matched", matched, "of", len(words_txt), "words")
     dur = voice.duration + 1.0
 
-    img = Image.open(pick("backgrounds/" + cat, ["png", "jpg", "jpeg"])).convert("RGB")
+    img = Image.open(pick("backgrounds/" + cat, ["png", "jpg", "jpeg"], num,
+                   data.get("background"))).convert("RGB")
     s = max(W / img.width, H / img.height)
     img = img.resize((int(img.width * s) + 1, int(img.height * s) + 1))
     bg = ImageClip(np.array(img)).set_duration(dur)
@@ -220,8 +244,15 @@ def main():
              .set_start(st).set_duration(max(en - st, 0.15)))
         clips.append(c)
 
-    bgm = audio_loop(AudioFileClip(pick("music", ["mp3", "m4a", "wav", "ogg"])),
-                     duration=dur).volumex(MUSIC_VOL)
+    mpath = pick("music", ["mp3", "m4a", "wav", "ogg"], num,
+                 data.get("music"), music_tag(data))
+    print("Music:", mpath, "| Background:", cat)
+    mclip = AudioFileClip(mpath)
+    if mclip.duration > dur + 3:
+        t0 = random.uniform(0, mclip.duration - dur - 1)
+        bgm = mclip.subclip(t0, t0 + dur).audio_fadeout(1.0).volumex(MUSIC_VOL)
+    else:
+        bgm = audio_loop(mclip, duration=dur).volumex(MUSIC_VOL)
     audio = CompositeAudioClip([bgm, voice])
 
     video = (CompositeVideoClip([bg, dim] + clips, size=(W, H))
