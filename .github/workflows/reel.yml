@@ -22,8 +22,17 @@ jobs:
           python-version: "3.11"
       - name: Pick next script
         id: pick
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
         run: |
           NEXT=$(ls queue 2>/dev/null | grep -E '^[0-9]+$' | sort -n | head -1)
+          if [ -z "$NEXT" ]; then
+            echo "Queue empty, making 1 backup script with Groq"
+            pip install requests
+            python generate_scripts.py 1 || true
+            NEXT=$(ls queue 2>/dev/null | grep -E '^[0-9]+$' | sort -n | head -1)
+          fi
           if [ -z "$NEXT" ]; then
             echo "Queue is empty. Add scripts to inbox.txt"
             exit 1
@@ -40,6 +49,9 @@ jobs:
         env:
           FISH_API_KEY: ${{ secrets.FISH_API_KEY }}
           FISH_VOICE_ID: ${{ secrets.FISH_VOICE_ID }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
       - uses: actions/upload-artifact@v4
         with:
           name: reel
@@ -57,7 +69,8 @@ jobs:
         run: |
           git config user.name "reel-bot"
           git config user.email "reel-bot@users.noreply.github.com"
-          git rm -r -q queue/${{ steps.pick.outputs.num }}
-          git commit -m "Used script ${{ steps.pick.outputs.num }}"
+          rm -rf queue/${{ steps.pick.outputs.num }}
+          git add -A queue
+          git commit -m "Used script ${{ steps.pick.outputs.num }}" || echo "nothing to commit"
           git pull --rebase || true
           git push
