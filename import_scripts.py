@@ -63,14 +63,19 @@ def split_blocks(text):
     if re.search(r"(?m)^\s*-{3,}\s*$", text):
         return [b for b in re.split(r"(?m)^\s*-{3,}\s*$", text) if b.strip()]
     lines = text.split("\n")
-    for test in (lambda l: fold(clean(l)).startswith(HEADER_STARTS),
-                 lambda l: bool(LABEL.match(l.strip())),
-                 lambda l: bool(re.match(r"^\s*\W{0,3}\d{1,3}\s*[\.\)]?\W{0,3}\s*$", l))):
+    for n, test in enumerate((lambda l: fold(clean(l)).startswith(HEADER_STARTS),
+                              lambda l: bool(LABEL.match(l.strip())),
+                              lambda l: bool(re.match(r"^\s*\W{0,3}\d{1,3}\s*[\.\)]?\W{0,3}\s*$", l)))):
         idx = [i for i, l in enumerate(lines) if l.strip() and test(l)]
         if len(idx) >= 2:
             idx.append(len(lines))
             return ["\n".join(lines[idx[k]:idx[k + 1]]) for k in range(len(idx) - 1)]
-    return [b for b in re.split(r"\n\s*\n", text) if b.strip()]
+        if len(idx) == 1 and n == 0:
+            return [text]          # exactly one "Psychology Says:" header = ONE script
+    blocks = [b for b in re.split(r"\n\s*\n", text) if b.strip()]
+    if any(len([l for l in b.split("\n") if l.strip()]) < 3 for b in blocks):
+        return [text] if text.strip() else []   # short pieces = one script with gaps, not many scripts
+    return blocks
 
 def from_text(b):
     cat, caption, tags, lines = None, "", "", []
