@@ -1,16 +1,30 @@
-import json, random, glob, os, sys, re, difflib, base64, subprocess
+import json, random, glob, os, sys, re, difflib, base64, subprocess, time, math
 import numpy as np
 import requests
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
-from moviepy.editor import (AudioFileClip, ImageClip, ColorClip,
+from moviepy.editor import (AudioFileClip, ImageClip, ColorClip, VideoFileClip,
                             CompositeVideoClip, CompositeAudioClip)
-from moviepy.audio.fx.all import audio_loop
+from moviepy.video.fx.all import loop as vloop
 
 W, H = 1080, 1920
 TEXT_Y = {"dark": 0.80, "brain": 0.15}
 ACCENT = {"dark": (120, 220, 255), "brain": (255, 214, 64)}
 UPPER = True
-MUSIC_VOL = 0.35
+VOICE_LUFS = -16      # voice loudness (fixed)
+MUSIC_LUFS = -29      # background music loudness: MORE NEGATIVE = QUIETER (-32 quieter, -26 louder)
+SEG_MAX = 3.0         # a new visual at least every ~3 seconds
+PX_KEY = os.environ.get("PIXABAY_API_KEY", "")
+GROQ_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_MODEL = os.environ.get("GROQ_MODEL") or "openai/gpt-oss-120b"
+FALLBACK_KW = {
+    "dark": ["lonely man silhouette", "rain window night", "city night walking",
+             "dark street alone", "man thinking dark", "empty room", "foggy road night",
+             "shadow wall", "sad man sitting"],
+    "brain": ["meditation sunrise", "mountain mist", "forest light rays", "calm lake",
+              "monk meditation", "ocean waves sunset", "river stream", "clouds sky",
+              "candle flame"],
+}
+PX_CACHE = {}
 MAX_WORDS = 3
 
 def find_font():
@@ -193,6 +207,236 @@ def whisper_times(words_txt, lines, audio_path, total):
         print("Whisper failed, using fallback:", e)
         return word_starts(words_txt, [], total)
 
+# ------------------------------------------------------------ audio levels
+def loudnorm_file(src_path, dst_path, lufs, tp=-2.0, start=0.0, length=None,
+                  loop_src=False, fade=False):
+    cmd = ["ffmpeg", "-y", "-loglevel", "error"]
+    if loop_src:
+        cmd += ["-stream_loop", "-1"]
+    if start:
+        cmd += ["-ss", "%.2f" % start]
+    cmd += ["-i", src_path]
+    if length:
+        cmd += ["-t", "%.2f" % length]
+    flt = "loudnorm=I=%s:TP=%s:LRA=7" % (lufs, tp)
+    if fade and length:
+        flt += ",afade=t=in:d=0.6,afade=t=out:st=%.2f:d=1.5" % max(length - 1.5, 0)
+    cmd += ["-af", flt, "-ar", "44100", "-ac", "2", dst_path]
+    subprocess.run(cmd, check=True)
+
+# ------------------------------------------------------------ visuals (Pixabay)
+def groq_keywords(lines, cat):
+    """One small Groq call: 3 Pixabay search words per script line."""
+    if not GROQ_KEY:
+        return None
+    numbered = "\n".join("%d) %s" % (i + 1, l) for i, l in enumerate(lines))
+    mood = ("dark, moody, lonely, night, shadows" if cat == "dark"
+            else "calm, peaceful, nature, meditation, light")
+    prompt = ("For each numbered line of a short video script, give 3 different stock-footage "
+              "search queries (2 or 3 simple English words each) for things that can be SEEN "
+              "(person, place, object, nature, weather). Match the meaning of the line. "
+              "Overall mood: " + mood + ". No abstract words, no names, no brands.\n\n"
+              + numbered + "\n\nReply with JSON only: {\"k\": [[\"q1\", \"q2\", \"q3\"], ...]} "
+              "with exactly %d lists." % len(lines))
+    body = {"model": GROQ_MODEL, "temperature": 0.6, "max_completion_tokens": 1800,
+            "messages": [{"role": "user", "content": prompt}]}
+    if "gpt-oss" in GROQ_MODEL:
+        body["reasoning_effort"] = "low"
+    for _ in range(3):
+        try:
+            r = requests.post("https://api.groq.com/openai/v1/chat/completions",
+                              headers={"Authorization": "Bearer " + GROQ_KEY,
+                                       "Content-Type": "application/json"},
+                              json=body, timeout=90)
+            if r.status_code == 429 or r.status_code >= 500:
+                time.sleep(15)
+                continue
+            if r.status_code != 200:
+                print("Groq keyword error:", r.status_code, r.text[:150])
+                return None
+            txt = r.json()["choices"][0]["message"]["content"]
+            data = json.loads(txt[txt.find("{"):txt.rfind("}") + 1])
+            ks = data["k"]
+            out = []
+            for k in ks[:len(lines)]:
+                k = [re.sub(r"[^a-zA-Z ]", "", str(x)).strip().lower() for x in k]
+                out.append([x for x in k if x][:3])
+            while len(out) < len(lines):
+                out.append([])
+            return out
+        except Exception as e:
+            print("Groq keyword problem:", str(e)[:120])
+            time.sleep(3)
+    return None
+
+def px_get(url, params):
+    for _ in range(4):
+        try:
+            r = requests.get(url, params=params, timeout=60)
+        except Exception as e:
+            print("Pixabay network error:", str(e)[:100])
+            time.sleep(5)
+            continue
+        if r.status_code == 429:
+            print("Pixabay rate limit, waiting 30s")
+            time.sleep(30)
+            continue
+        if r.status_code != 200:
+            print("Pixabay error %s: %s" % (r.status_code, r.text[:120]))
+            return None
+        time.sleep(0.8)
+        return r.json()
+    return None
+
+def px_search(kind, q):
+    words = q.split()
+    tries = [q]
+    if len(words) > 1:
+        tries.append(" ".join(words[:2]))
+        tries.append(words[0])
+    for qq in tries:
+        key = (kind, qq)
+        if key in PX_CACHE:
+            hits = PX_CACHE[key]
+        else:
+            params = {"key": PX_KEY, "q": qq, "per_page": 20, "safesearch": "true"}
+            if kind == "video":
+                data = px_get("https://pixabay.com/api/videos/", params)
+            else:
+                params.update({"image_type": "photo", "orientation": "vertical",
+                               "min_height": 1200})
+                data = px_get("https://pixabay.com/api/", params)
+            hits = (data or {}).get("hits", [])
+            PX_CACHE[key] = hits
+        if hits:
+            return hits
+    return []
+
+def download(url, path):
+    if os.path.exists(path):
+        return path
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    for _ in range(3):
+        try:
+            with requests.get(url, stream=True, timeout=120) as r:
+                if r.status_code != 200:
+                    time.sleep(3)
+                    continue
+                with open(path + ".part", "wb") as f:
+                    for chunk in r.iter_content(1 << 16):
+                        f.write(chunk)
+            os.replace(path + ".part", path)
+            return path
+        except Exception as e:
+            print("Download failed:", str(e)[:100])
+            time.sleep(3)
+    return None
+
+def local_visual(num, name=None):
+    files = [f for e in ("png", "jpg", "jpeg") for f in glob.glob("backgrounds/*/*." + e)]
+    if not files:
+        raise SystemExit("No Pixabay result and no backgrounds/ images to fall back on")
+    files.sort()
+    return {"kind": "image", "path": files[num % len(files)], "id": "local"}
+
+def get_visual(kw, d, rng, used, num):
+    if not PX_KEY or not kw:
+        return local_visual(num)
+    order = ["video", "image"] if rng.random() < 0.8 else ["image", "video"]
+    for kind in order:
+        hits = px_search(kind, kw)
+        hits = [h for h in hits if kind == "image" or h.get("duration", 99) >= d]
+        fresh = [h for h in hits if "%s%s" % (kind[0], h["id"]) not in used]
+        pool = (fresh or hits)[:10]
+        for h in rng.sample(pool, len(pool)):
+            uid = "%s%s" % (kind[0], h["id"])
+            if kind == "video":
+                url = ""
+                for size in ("medium", "small", "large", "tiny"):
+                    url = (h.get("videos", {}).get(size) or {}).get("url", "")
+                    if url:
+                        break
+                if not url:
+                    continue
+                path = download(url, os.path.join("work", "clips", uid + ".mp4"))
+            else:
+                url = h.get("largeImageURL") or h.get("webformatURL")
+                if not url:
+                    continue
+                path = download(url, os.path.join("work", "clips", uid + ".jpg"))
+            if not path:
+                continue
+            used.add(uid)
+            return {"kind": kind, "path": path, "id": uid}
+    print("No Pixabay result for %r, using local background" % kw)
+    return local_visual(num)
+
+def cover_image(path):
+    img = Image.open(path).convert("RGB")
+    s = max(W / img.width, H / img.height)
+    img = img.resize((int(img.width * s) + 1, int(img.height * s) + 1))
+    x, y = (img.width - W) // 2, (img.height - H) // 2
+    return np.array(img.crop((x, y, x + W, y + H)))
+
+def piece_clip(vis, t0, d):
+    if vis["kind"] == "video":
+        c = VideoFileClip(vis["path"], audio=False)
+        if c.duration < d + 0.1:
+            c = vloop(c, duration=d + 0.1)
+        else:
+            st = random.uniform(0, max(c.duration - d - 0.1, 0))
+            c = c.subclip(st, st + d + 0.1)
+        if c.w / c.h > W / H:
+            cw = int(c.h * W / H) // 2 * 2
+            x1 = (c.w - cw) // 2
+            c = c.crop(x1=x1, x2=x1 + cw)
+        else:
+            ch = int(c.w * H / W) // 2 * 2
+            y1 = (c.h - ch) // 2
+            c = c.crop(y1=y1, y2=y1 + ch)
+        c = c.resize((W, H))
+        return c.set_start(t0).set_duration(d)
+    c = ImageClip(cover_image(vis["path"])).set_duration(d)
+    c = c.resize(lambda t: 1 + 0.06 * t / d).set_position("center")
+    return c.set_start(t0)
+
+def plan_pieces(lines, wst, dur):
+    """Cut the reel into pieces of at most SEG_MAX seconds, a new piece at every line start."""
+    starts, idx = [], 0
+    for l in lines:
+        starts.append(0.0 if idx == 0 else wst[min(idx, len(wst) - 1)])
+        idx += len(l.split())
+    for i in range(1, len(starts)):
+        starts[i] = max(starts[i], starts[i - 1] + 0.3)
+    ends = starts[1:] + [dur]
+    pieces = []
+    for i, (a, b) in enumerate(zip(starts, ends)):
+        span = max(b - a, 0.3)
+        n = max(1, int(math.ceil(span / SEG_MAX)))
+        for k in range(n):
+            pieces.append((i, k, a + span * k / n, span / n))
+    return pieces
+
+def build_visuals(lines, wst, dur, cat, num):
+    rng = random.Random(num * 7919 + 13)
+    kws = groq_keywords(lines, cat)
+    if not kws:
+        print("Using built-in keywords")
+        kws = [[] for _ in lines]
+    bank = FALLBACK_KW.get(cat, FALLBACK_KW["dark"])
+    used, clips = set(), []
+    for (li, k, t0, d) in plan_pieces(lines, wst, dur):
+        mine = kws[li] if li < len(kws) else []
+        kw = mine[k % len(mine)] if mine else bank[(num + li + k) % len(bank)]
+        vis = get_visual(kw, d, rng, used, num + li + k)
+        print("Visual %.1fs +%.1fs: %s -> %s" % (t0, d, kw, vis["id"]))
+        try:
+            clips.append(piece_clip(vis, t0, d))
+        except Exception as e:
+            print("Clip failed (%s), using local image" % str(e)[:100])
+            clips.append(piece_clip(local_visual(num + li + k), t0, d))
+    return clips
+
 def main():
     folder = ("queue/%03d" % int(sys.argv[1])) if len(sys.argv) > 1 and sys.argv[1].strip().isdigit() \
              else sorted(glob.glob("queue/*/"))[-1]
@@ -206,6 +450,8 @@ def main():
     if data.get("tts") == "fish":
         voice_path = "out/voice.mp3"
         heard = tts_fish(" ".join(lines), voice_path)
+        loudnorm_file(voice_path, "out/voice_norm.wav", VOICE_LUFS, tp=-1.5)
+        voice_path = "out/voice_norm.wav"
         voice = AudioFileClip(voice_path)
         wst, matched = word_starts(words_txt, heard, voice.duration)
     else:
@@ -215,13 +461,8 @@ def main():
     print("Matched", matched, "of", len(words_txt), "words")
     dur = voice.duration + 1.0
 
-    img = Image.open(pick("backgrounds/" + cat, ["png", "jpg", "jpeg"], num,
-                   data.get("background"))).convert("RGB")
-    s = max(W / img.width, H / img.height)
-    img = img.resize((int(img.width * s) + 1, int(img.height * s) + 1))
-    bg = ImageClip(np.array(img)).set_duration(dur)
-    bg = bg.resize(lambda t: 1 + 0.06 * t / dur).set_position("center")
-    dim = ColorClip((W, H), color=(0, 0, 0)).set_opacity(0.25).set_duration(dur)
+    vis_clips = build_visuals(lines, wst, dur, cat, num)
+    dim = ColorClip((W, H), color=(0, 0, 0)).set_opacity(0.35).set_duration(dur)
 
     chunks = make_chunks(lines)
     starts = [max(0.0, wst[fi] - 0.05) for _, fi in chunks]
@@ -247,15 +488,20 @@ def main():
     mpath = pick("music", ["mp3", "m4a", "wav", "ogg"], num,
                  data.get("music"), music_tag(data))
     print("Music:", mpath, "| Background:", cat)
-    mclip = AudioFileClip(mpath)
-    if mclip.duration > dur + 3:
-        t0 = random.uniform(0, mclip.duration - dur - 1)
-        bgm = mclip.subclip(t0, t0 + dur).audio_fadeout(1.0).volumex(MUSIC_VOL)
+    mdur = float(subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=nw=1:nk=1", mpath],
+        stdout=subprocess.PIPE, text=True).stdout.strip() or 0)
+    if mdur > dur + 3:
+        t0, looping = random.uniform(0, mdur - dur - 1), False
     else:
-        bgm = audio_loop(mclip, duration=dur).volumex(MUSIC_VOL)
+        t0, looping = 0.0, True
+    loudnorm_file(mpath, "out/music_norm.wav", MUSIC_LUFS, tp=-3.0, start=t0,
+                  length=dur, loop_src=looping, fade=True)
+    bgm = AudioFileClip("out/music_norm.wav")
     audio = CompositeAudioClip([bgm, voice])
 
-    video = (CompositeVideoClip([bg, dim] + clips, size=(W, H))
+    video = (CompositeVideoClip(vis_clips + [dim] + clips, size=(W, H))
              .set_duration(dur).set_audio(audio))
     video.write_videofile("out/reel.mp4", fps=24, codec="libx264",
                           audio_codec="aac", preset="veryfast",
