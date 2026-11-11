@@ -12,6 +12,9 @@ on:
         default: "private"
 permissions:
   contents: write
+concurrency:
+  group: reel
+  cancel-in-progress: false
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -20,7 +23,45 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      # ---------- 1) Pehle dekho manual/ folder mein video hai ya nahi ----------
+      - name: Check manual videos
+        id: manual
+        run: |
+          COUNT=$(ls manual 2>/dev/null | grep -i -E '\.(zip|mp4|mov|m4v|webm)$' | wc -l)
+          echo "Manual videos waiting: $COUNT"
+          if [ "$COUNT" -gt 0 ]; then
+            echo "has=true" >> $GITHUB_OUTPUT
+          else
+            echo "has=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ---------- 2A) Manual video hai: seedha upload (public), phir delete ----------
+      - name: Upload next manual video
+        if: ${{ steps.manual.outputs.has == 'true' && github.event.inputs.upload != 'false' }}
+        run: |
+          pip install requests faster-whisper
+          python upload_manual.py "${{ github.event.inputs.privacy || 'public' }}"
+        env:
+          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
+      - name: Save manual folder changes
+        if: ${{ steps.manual.outputs.has == 'true' && github.event.inputs.upload != 'false' }}
+        run: |
+          git config user.name "reel-bot"
+          git config user.email "reel-bot@users.noreply.github.com"
+          date -u > .keepalive
+          git add -A manual .keepalive
+          git commit -m "Manual video uploaded" || echo "nothing to commit"
+          git pull --rebase || true
+          git push
+
+      # ---------- 2B) Manual video nahi hai: purana automation (backup) ----------
       - name: Pick next script
+        if: ${{ steps.manual.outputs.has != 'true' }}
         id: pick
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -40,12 +81,17 @@ jobs:
           echo "num=$NEXT" >> $GITHUB_OUTPUT
           echo "Using script $NEXT"
       - name: Install ffmpeg and fonts
+        if: ${{ steps.manual.outputs.has != 'true' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
           sudo apt-get install -y fonts-montserrat || true
-      - run: pip install "moviepy==1.0.3" "pillow==9.5.0" "numpy<2" requests faster-whisper
-      - run: python make_reel.py ${{ steps.pick.outputs.num }}
+      - name: Install python packages
+        if: ${{ steps.manual.outputs.has != 'true' }}
+        run: pip install "moviepy==1.0.3" "pillow==9.5.0" "numpy<2" requests faster-whisper
+      - name: Make reel
+        if: ${{ steps.manual.outputs.has != 'true' }}
+        run: python make_reel.py ${{ steps.pick.outputs.num }}
         env:
           FISH_API_KEY: ${{ secrets.FISH_API_KEY }}
           FISH_VOICE_ID: ${{ secrets.FISH_VOICE_ID }}
@@ -53,11 +99,12 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
       - uses: actions/upload-artifact@v4
+        if: ${{ steps.manual.outputs.has != 'true' }}
         with:
           name: reel
           path: out/reel.mp4
       - name: Upload to YouTube
-        if: ${{ github.event.inputs.upload != 'false' }}
+        if: ${{ steps.manual.outputs.has != 'true' && github.event.inputs.upload != 'false' }}
         run: python upload_youtube.py out/reel.mp4 queue/${{ steps.pick.outputs.num }}/script.json "${{ github.event.inputs.privacy || 'public' }}"
         env:
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
@@ -66,11 +113,13 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GROQ_MODEL: ${{ secrets.GROQ_MODEL }}
       - name: Remove used script
+        if: ${{ steps.manual.outputs.has != 'true' }}
         run: |
           git config user.name "reel-bot"
           git config user.email "reel-bot@users.noreply.github.com"
           rm -rf queue/${{ steps.pick.outputs.num }}
-          git add -A queue
+          date -u > .keepalive
+          git add -A queue .keepalive
           git commit -m "Used script ${{ steps.pick.outputs.num }}" || echo "nothing to commit"
           git pull --rebase || true
           git push
