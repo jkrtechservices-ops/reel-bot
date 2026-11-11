@@ -1,0 +1,54 @@
+name: number-manual
+on:
+  push:
+    branches: [main]
+    paths:
+      - "manual/**"
+permissions:
+  contents: write
+concurrency:
+  group: numbering
+  cancel-in-progress: false
+jobs:
+  number:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add 001, 002 numbers to new files
+        run: |
+          python3 - <<'PY'
+          import os, re
+          FOLDER = "manual"
+          SKIP = {"readme.txt", ".gitkeep"}
+          names = [n for n in os.listdir(FOLDER)
+                   if os.path.isfile(os.path.join(FOLDER, n)) and n.lower() not in SKIP]
+          def stem_of(n):
+              return os.path.splitext(n)[0]
+          numbered, plain = {}, {}
+          for n in names:
+              s = stem_of(n)
+              m = re.match(r"^(\d+)[_\-\s.]", s + "_")
+              if m:
+                  numbered.setdefault(s, []).append(n)
+              else:
+                  plain.setdefault(s, []).append(n)
+          top = 0
+          for s in numbered:
+              top = max(top, int(re.match(r"^(\d+)", s).group(1)))
+          for s in sorted(plain, key=lambda x: x.lower()):
+              top += 1
+              clean = re.sub(r"\s+", "_", s.strip())
+              for n in plain[s]:
+                  ext = os.path.splitext(n)[1]
+                  new = "%03d_%s%s" % (top, clean, ext)
+                  os.rename(os.path.join(FOLDER, n), os.path.join(FOLDER, new))
+                  print("Renamed:", n, "->", new)
+          PY
+      - name: Save new names
+        run: |
+          git config user.name "reel-bot"
+          git config user.email "reel-bot@users.noreply.github.com"
+          git add -A manual
+          git commit -m "Auto numbering" || echo "nothing to rename"
+          git pull --rebase || true
+          git push
